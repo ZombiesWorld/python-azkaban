@@ -1,0 +1,608 @@
+# -*- coding: UTF-8 -*-
+
+import sys
+import os
+
+sys.path.append('/usr/local/bin')
+import json
+import requests
+import logging
+import time
+import datetime
+from impala.dbapi import connect
+import pymysql
+from get_database_info import get_database_info
+import logging as logger
+from functools import reduce
+import re
+
+proxy = {
+    'http': 'http://172.20.6.194:3128',
+    'https': 'https://172.20.6.194:3128'
+}
+
+class AzkabanHelper:
+    def __init__(self, url, username, password):
+        self.url = url
+        self.username = username
+        self.password = password
+        self.login()
+
+    def login(self):
+        '''
+        登录azkaban获取sessionID
+        :return: sessionID
+        '''
+        params = {
+            'action': 'login',
+            'username': self.username,
+            'password': self.password
+        }
+        r = requests.post(url=self.url, data=params, verify=False)
+        if r.ok:
+            res = json.loads(r.text)
+            self.sessionId = res['session.id']
+            logging.info("登录Azkaban成功，获取sessionID:{}".format(self.sessionId))
+        else:
+            logging.error("Azkaban登录异常！")
+            exit(1)
+
+    def execFlow(self, project, flow, **kwargs):
+        '''
+        执行Azkaban Flow
+        :param project: 工程名
+        :param flow: flow名
+        :param sessionId: 登录的session
+        :param kwargs: 传参
+        :return:
+        '''
+
+        url = '%s/executor?ajax=executeFlow&session.id=%s&project=%s&flow=%s' % (
+            self.url, self.sessionId, project, flow)
+
+        for key, value in kwargs.items():
+            url = url + '&flowOverride[%s]=%s' % (key, value)
+
+        r = requests.get(url, verify=False)
+        if r.ok:
+            res = json.loads(r.text)
+            if "error" in res:
+                logging.error(res["error"])
+            else:
+                logging.info(
+                    "调用 Azkaban任务： project:{project} flow:{flow} execid:{execid} message:{message}".format(**res))
+                return res
+        else:
+            logging.error("调用Azkaban任务失败！")
+
+    def execFlowWithoutSuccessfulJob(self, project, flow, disabled):
+        '''
+        执行Azkaban Flow
+        :param project: 工程名
+        :param flow: flow名
+        :param sessionId: 登录的session
+        :return:
+        '''
+
+        url = '%s/executor?ajax=executeFlow&session.id=%s&project=%s&flow=%s&disabled=%s' % (
+            self.url, self.sessionId, project, flow, disabled)
+
+        r = requests.get(url, verify=False)
+        if r.ok:
+            res = json.loads(r.text)
+            if "error" in res:
+                logging.error(res["error"])
+            else:
+                logging.info(
+                    "调用 Azkaban任务： project:{project} flow:{flow} execid:{execid} message:{message}".format(**res))
+                return res
+        else:
+            logging.error("调用Azkaban任务失败！")
+
+    def fetchRunningExecutions(self, project, flow):
+        '''
+        获取当前正在运行的Project
+        :param project: 工程名
+        :param flow: flow名
+        :param sessionId: 登录的session
+        :return:
+        '''
+
+        url = "%s/executor?ajax=getRunning&session.id=%s&project=%s&flow=%s" % (self.url, self.sessionId, project, flow)
+
+        r = requests.get(url, verify=False)
+        if r.ok:
+            res = json.loads(r.text)
+            if "error" in res:
+                logging.error(res["error"])
+            if len(res):
+                logging.info("当前正在执行的%s任务：%s" % (project, str(res['execIds'])))
+                return res['execIds']
+            else:
+                logging.info("当前没有正在执行的%s任务" % project)
+        else:
+            logging.error("查询Azkaban任务失败！")
+
+    def execFlowWithMail(self, project, flow, mail, **kwargs):
+        '''
+        执行Azkaban Flow
+        :param project: 工程名
+        :param flow: flow名
+        :param sessionId: 登录的session
+        :param kwargs: 传参
+        :return:
+        '''
+
+        if mail is not None or mail != '':
+            url = '%s/executor?ajax=executeFlow&session.id=%s&project=%s&flow=%s&failureEmailsOverride=true&failureEmails=%s' % (
+                self.url, self.sessionId, project, flow, mail)
+        else:
+            url = '%s/executor?ajax=executeFlow&session.id=%s&project=%s&flow=%s' % (
+                self.url, self.sessionId, project, flow)
+
+        for key, value in kwargs.items():
+            url = url + '&flowOverride[%s]=%s' % (key, value)
+
+        r = requests.get(url, verify=False)
+        if r.ok:
+            res = json.loads(r.text)
+            if "error" in res:
+                logging.error(res["error"])
+            else:
+                logging.info(
+                    "调用 Azkaban任务： project:{project} flow:{flow} execid:{execid} message:{message}".format(**res))
+                return res["execid"]
+        else:
+            logging.error("调用Azkaban任务失败！")
+
+    def cancelRunningFlow(self, execids):
+        '''
+        通过执行ID来kill Azkaban任务
+        :param execid:
+        :param sessionId:
+        :return:
+        '''
+        for execid in execids:
+            url = "%s/executor?ajax=cancelFlow&session.id=%s&execid=%s" % (self.url, self.sessionId, execid)
+            r = requests.get(url, verify=False)
+            if r.ok:
+                res = json.loads(r.text)
+                if "error" in res:
+                    logging.error(res["error"])
+                else:
+                    logging.info("kill Azkaban任务：" + str(execid))
+                    return 'ok'
+            else:
+                logging.error("kill Azkaban任务失败！")
+
+    def fetchFirstFlowByProject(self, project, **kwargs):
+        '''
+        获取当前porject的首个flow编号
+        :param project: 工程名
+        :param sessionId: 登录的session
+        :return:
+        '''
+        url = "%s/manager?ajax=fetchprojectflows&session.id=%s&project=%s" % (self.url, self.sessionId, project)
+
+        r = requests.get(url, verify=False)
+        try:
+            if r.ok:
+                res = json.loads(r.text)
+                if "error" in res:
+                    logging.error(res["error"])
+                if len(res):
+                    return res['flows'][0]['flowId']
+        except Exception as e:
+            logging.error(e)
+        return ''
+
+    def fetchExecutions(self, project, flow, length=10):
+        '''
+        获取指定Project和flow的执行状态
+        :param execid:
+        :param sessionId:
+        :return:
+        '''
+        url = "%s/manager?ajax=fetchFlowExecutions&session.id=%s&project=%s&flow=%s&start=0&length=%s" % (
+            self.url, self.sessionId, project, flow, length)
+        r = requests.get(url, verify=False)
+        if r.ok:
+            res = json.loads(r.text)
+            if "error" in res:
+                logger.error(res["error"])
+            else:
+                return res
+        else:
+            logger.error("获取任务信息错误！")
+
+    def timeStamp(self, timeNum):
+        '''
+        将13位时间戳转换为字符串类型的标准时间格式
+        :return:
+        '''
+        timeStamp = float(timeNum / 1000)
+        timeArray = time.localtime(timeStamp)
+        otherStyleTime = time.strftime("%Y-%m-%d %H:%M:%S", timeArray)
+        return (otherStyleTime)
+
+    def get_log(self, project, flow):
+        '''
+        获取日志，根据日志返回当天流成功次数与执行时间
+        :param project:
+        :param flow:
+        :param job:
+        :return:
+        '''
+        logging.info("获取监控日志")
+        # 这个length表示取距离当前时间最近的100条日志进行分析fetchFlowExecutions获取flow级别，fetchflowgraph获取flow里所有的job
+        url = "%s/manager?ajax=fetchFlowExecutions&session.id=%s&project=%s&flow=%s&start=0&length=100" % (
+            self.url, self.sessionId, project, flow)
+        r = requests.get(url, verify=False)
+        if r.ok:
+            res = json.loads(r.text)
+            if "error" in res:
+                logging.error(res["error"])
+            # 正常获取日志
+            else:
+                # 获取当天0点的13位时间戳，和日志时间戳位数一样才能比较
+                zeroPoint = int(round(time.time() * 1000)) - int(
+                    int(time.time() - time.timezone) % 86400) * 1000
+                # 初始化一个空列表，用来存放日志里的执行状态与执行时间
+                status_list = []
+                time_list = []
+                # 遍历日志里的execution
+                for count, i in enumerate(res[u'executions']):
+                    # 保证获取的日志是当天的日志
+                    if i[u'startTime'] > zeroPoint:
+                        status_list.append(i[u'status'])
+                        # 将时间戳转换为字符串类型时间
+                        startTime = self.timeStamp(i[u'startTime'])
+                        endTime = self.timeStamp(i[u'endTime'])
+                        # 将字符串类型时间转换为标准格式时间
+                        dateTime_startTime = datetime.datetime.strptime(startTime, '%Y-%m-%d %H:%M:%S')
+                        dateTime_endTime = datetime.datetime.strptime(endTime, '%Y-%m-%d %H:%M:%S')
+                        timeinterval = dateTime_endTime - dateTime_startTime
+                        time_list.append(timeinterval)
+                    else:
+                        continue
+                # 统计日志里succeed出现的次数
+                succeeded_times = status_list.count('SUCCEEDED')
+                killed_times = status_list.count('KILLED')
+                failed_times = status_list.count('FAILED')
+                # runtime是整个流最大运行时间
+                if time_list == []:
+                    runtime = datetime.timedelta(0, 0)
+                else:
+                    runtime = max(time_list)
+        else:
+            logging.info("未获取到日志")
+            succeeded_times = None
+            killed_times = None
+            failed_times = None
+            runtime = datetime.timedelta(0, 0)
+        return succeeded_times, killed_times, failed_times, runtime
+
+    def fetchTodayExecutions(self, list1):
+        '''
+        根据获取日志判断是否需要发送信息（根据最后的end_job节点是否运行判断该流是否运行）
+        :param execid:
+        :param sessionId
+        :return:
+        '''
+        # 连接MySQL数据库
+
+        sendmessage1 = []   # 用来存放执行不成功给或未执行job的信息
+        sendmessage2 = []   # 用来存放工作流的报警信息
+        sendmessage3 = []   # 用来存放单个节点的报警信息
+
+        time_now_day = datetime.datetime.now().day
+        time_now_hour = datetime.datetime.now().hour
+        time_now_minute = datetime.datetime.now().minute
+        # list1是我们从impala表里获取到的project、flow、job等，用作判断条件
+        for i in list1:
+            project_name = i[0]  # project名字
+            flow_name = i[1]  # flow名字
+            job_name = i[2]  # job名字
+            impala_execute_time = i[3]  # 执行时间，以秒为单位
+            impala_execute_frequency = i[4]  # 执行次数
+            object_description = i[5]  # 预警对象描述
+            status_information = i[6]  # 状态信息
+
+            fetch_executions = azkaban_client.fetchExecutions(project_name, flow_name, length=200)
+            time_now = time.strftime("%Y-%m-%d", time.localtime(time.time()))
+            end_status = []
+            # 获取相应的执行id及时间
+            exec_list = list(filter(lambda x: x[2] > time_now,
+                                    [(x['execId'],
+                                      time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(x['startTime']) / 1000)),
+                                      time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(x['endTime']) / 1000)),
+                                      int(x['endTime']) - int(x['startTime'])) for
+                                     x in
+                                     fetch_executions['executions']]))
+            # azkaban执行job所花的时间，先判断是否执行了job，再判断执行时间
+            azkaban_exec_time = 0
+            # 该job执行的时间
+            if exec_list != []:
+                azkaban_exec_time = max([x[3] for x in exec_list]) / 1000
+
+            res_f1 = [] #存放执行job状态为成功的日志
+            res_f2 = [] #存放执行job所有状态的日志
+            for exec_detail in exec_list:
+                # 获取job状态
+                detail_info = azkaban_client.fetchExecutionsInfo(exec_detail[0])
+                # 过滤出执行成功的job状态
+                res_1 = list(filter(lambda x: x[1] == 'SUCCEEDED', list(map(lambda x: (x['id'], x['status']),filter(lambda x: x['id'] == job_name, detail_info['nodes'])))))
+                if res_1 != []:
+                    res_f1.append(res_1)
+                # 获取job所有执行状态
+                res_2=list(map(lambda x: (x['id'], x['status']),filter(lambda x: x['id'] == job_name, detail_info['nodes'])))
+                if res_2 != []:
+                    res_f2.append(res_2)
+                    end_status = res_f2[len(res_f2) - 1][0][1]  # 存放监控时间点之前(即监控日志)，最后一个job的执行状态
+            azkaban_execute_frequency = len(res_f1) #job执行成功的次数
+
+            if res_f1 != []:
+                if  time_now_day==26:
+                    if job_name=='end_dtp_law_api_query' and azkaban_execute_frequency < impala_execute_frequency :
+                        sendmessage2.append("\n>{}-{}-{}\n>状态信息:{}\n".format(project_name, object_description, job_name,status_information))
+                elif job_name=='app_api_exchange_rate_di' or job_name=='app_api_ent_sent_hit_v2_di':
+                    if time_now_hour >= 10 and time_now_hour <= 18 and time_now_minute <= 3 and end_status == 'FAILED':
+                        sendmessage3.append("\n>{}-{}-{}\n>状态信息:{}\n".format(project_name, object_description, job_name,status_information))
+                elif job_name=='end_sec_ent_announ' :
+                    if time_now_hour == 18 and azkaban_execute_frequency < 2 or azkaban_exec_time > impala_execute_time:
+                        sendmessage2.append("\n>{}-{}-{}\n>状态信息:{}\n".format(project_name, object_description, job_name,status_information))
+                elif job_name=='end_dtp_sec_compre' :
+                    if time_now_hour == 10 and time_now_minute == 0 or time_now_hour == 11 and time_now_minute == 30 or time_now_hour == 13 and time_now_minute == 0 or time_now_hour == 14 and time_now_minute == 30 or time_now_minute == 16 and time_now_minute == 0 or time_now_minute == 17 and time_now_minute == 30 or time_now_minute == 19 and time_now_minute == 0:
+                        if azkaban_exec_time > impala_execute_time or end_status=='FAILED':
+                            sendmessage2.append("\n>{}-{}-{}\n>状态信息:{}\n".format(project_name, object_description, job_name,status_information))
+                #工作流
+                else :
+                    if impala_execute_time == 0 and impala_execute_frequency == 0:
+                        if end_status=='FAILED':
+                            sendmessage2.append("\n>{}-{}-{}\n>状态信息:{}\n".format(project_name, object_description, job_name,status_information))
+                    elif impala_execute_time == 0 and impala_execute_frequency != 0:
+                        if re.search('执行状态失败',status_information) is not None:
+                            if azkaban_execute_frequency < impala_execute_frequency or end_status=='FAILED':
+                                sendmessage2.append("\n>{}-{}-{}\n>状态信息:{}\n".format(project_name, object_description, job_name,status_information))
+                        else:
+                            if azkaban_execute_frequency < impala_execute_frequency:
+                                sendmessage2.append("\n>{}-{}-{}\n>状态信息:{}\n".format(project_name, object_description, job_name,status_information))
+                    elif impala_execute_time != 0 and impala_execute_frequency == 0:
+                        if re.search('执行状态失败',status_information) is not None:
+                            if azkaban_exec_time > impala_execute_time or end_status=='FAILED':
+                                sendmessage2.append("\n>{}-{}-{}\n>状态信息:{}\n".format(project_name, object_description, job_name,status_information))
+                        else:
+                            if azkaban_exec_time > impala_execute_time:
+                                sendmessage2.append("\n>{}-{}-{}\n>状态信息:{}\n".format(project_name, object_description,job_name,status_information))
+                    elif impala_execute_time != 0 and impala_execute_frequency !=0:
+                        if re.search('执行状态失败', status_information) is not None:
+                            if azkaban_exec_time > impala_execute_time or azkaban_execute_frequency < impala_execute_frequency or end_status=='FAILED':
+                                sendmessage2.append("\n>{}-{}-{}\n>状态信息:{}\n".format(project_name, object_description,job_name,status_information))
+                        else:
+                            if azkaban_exec_time > impala_execute_time or azkaban_execute_frequency < impala_execute_frequency:
+                                sendmessage2.append("\n>{}-{}-{}\n>状态信息:{}\n".format(project_name, object_description,job_name,status_information))
+            else:
+                if job_name=='end_dtp_law_api_query':
+                    if time_now_day==26:
+                        sendmessage1.append("\n>{}执行成功0次\n".format(object_description))
+                else:
+                    sendmessage1.append("\n>{}执行成功0次\n".format(object_description))
+
+
+        str_f1=''
+        length1=len(sendmessage1)
+        for i in range(0,length1):
+            str_f1 = str_f1 + str(i + 1) + '、' + sendmessage1[i]
+        str_f2 = ""
+        length2 = len(sendmessage2)
+        for i in range(0, length2):
+            str_f2 = str_f2 + str(i + 1) + '、' + sendmessage2[i]
+        # str_f3 = ""
+        # length3 = len(sendmessage3)
+        # for i in range(0, length3):
+        #     str_f3 = str_f3 + str(i + 1) + '、' + sendmessage3[i]
+
+
+        str_f = '今天未执行的任务或工作流：\n'+str_f1+'工作流预警:\n' + str_f2 #+ '\n' + '任务预警:\n' + str_f3
+        print(str_f)
+        #wechat_client.markdown(str_f)
+
+    def fetchExecutionsInfo(self, exec_id):
+        '''
+        获取指定执行id的执行状态
+        :param execid:
+        :param sessionId:
+        :return:
+        '''
+        url = "%s/executor?ajax=fetchexecflow&session.id=%s&execid=%s" % (self.url, self.sessionId, exec_id)
+        r = requests.get(url, verify=False)
+        if r.ok:
+            res = json.loads(r.text)
+            if "error" in res:
+                logger.error(res["error"])
+            else:
+                return res
+        else:
+            logger.error("获取任务信息错误！")
+
+
+class ImpalaClient:
+    def __init__(self, info):
+        # conn = connect(host='cloudera01', port=21050, use_ldap=True, ldap_user="cdh_dev", ldap_password="123456")
+        self.conn = connect(**info)
+        self.host = info['host']
+
+
+    def __del__(self):
+        if self.conn is not None:
+            self.conn.close()
+
+    def query(self, sql):
+        '''
+        执行MySQL语句
+        :param sql:
+        :return:
+        '''
+        try:
+            # 执行sql查询，返回字典
+            cursor = self.conn.cursor()
+            # 执行语句
+            cursor.execute(sql)
+            # 获取全部数据
+            result = cursor.fetchall()
+            cursor.close()
+            logging.info("{}:执行Impala语句：{}".format(self.host, sql))
+            return result
+        except Exception as e:
+            logging.error("{}:执行Impala语句失败: {}".format(self.host, e))
+            return None
+
+    def exe(self, sql):
+        '''
+           执行MySQL语句
+           :param sql:
+       '''
+        try:
+            # 使用cursor()方法获取操作游标
+            cursor = self.conn.cursor()
+            # 执行sql语句
+            logging.info("{}:执行Impala语句：{}".format(self.host, sql))
+            cursor.execute(sql)
+            cursor.close()
+        except Exception as e:
+            logging.error("{}:执行Impala语句失败: {}".format(self.host, e))
+
+    def impala_exec_result(self, sql):
+        '''
+        执行MySQL语句
+        :param sql:
+        :return:
+        '''
+        try:
+            # 执行sql查询，返回字典
+            cursor = self.conn.cursor(dictify=True)
+            # 执行语句
+            cursor.execute(sql)
+            # 获取全部数据
+            result = cursor.fetchall()
+            cursor.close()
+            logging.info("{}:执行Impala语句：{}".format(self.host, sql))
+            return result
+        except Exception as e:
+            logging.error("{}:执行Impala语句失败: {}".format(self.host, e))
+            return None
+
+    def exe_sqls(self, sql_list):
+        '''
+            执行MySQL语句
+            :param sql:
+        '''
+        # 使用cursor()方法获取操作游标
+        cursor = self.conn.cursor()
+        # 执行sql语句
+        for sql in sql_list:
+            try:
+                logging.info("{}:执行Impala语句：{}".format(self.host, sql))
+                cursor.execute(sql)
+            except Exception as e:
+                logging.error("{}:执行Impala语句失败: {}".format(self.host, e))
+        cursor.close()
+
+
+class WechatWorkWebhook:
+    '''
+    企业微信机器人
+    '''
+    headers = {"Content-Type": "text/plain"}
+
+    def __init__(self, webhook_url, proxy=None):
+        self.webhook_url = webhook_url
+        self.proxy = proxy
+
+    def text(self, text, mentioned_list=[], mentioned_mobile_list=[]):
+        data = {
+            "msgtype": "text",
+            "text": {
+                "content": text,
+                "mentioned_list": mentioned_list,
+                "mentioned_mobile_list": mentioned_mobile_list
+            }
+        }
+        data = json.dumps(data, ensure_ascii=False)
+        if self.proxy:
+            return requests.post(self.webhook_url, headers=self.headers, data=data, proxies=self.proxy).json()
+
+        return requests.post(self.webhook_url, headers=self.headers, data=data).json()
+
+    def markdown(self, markdown):
+        if markdown == '':
+            pass
+        else:
+            data = {
+                "msgtype": "markdown",
+                "markdown": {
+                    "content": markdown
+                }
+            }
+            if self.proxy:
+                return requests.post(self.webhook_url, headers=self.headers, json=data, proxies=self.proxy).json()
+            return requests.post(self.webhook_url, headers=self.headers, json=data).json()
+
+        def news(self, articles):
+            data = {
+                "msgtype": "news",
+                "news": {
+                    "articles": articles
+                }
+            }
+            if self.proxy:
+                return requests.post(self.webhook_url, headers=self.headers, json=data, proxies=self.proxy).json()
+            return requests.post(self.webhook_url, headers=self.headers, json=data).json()
+
+        def media(self, media_id):
+            data = {
+                "msgtype": "file",
+                "file": {
+                    "media_id": media_id
+                }
+            }
+            if self.proxy:
+                return requests.post(self.webhook_url, headers=self.headers, json=data, proxies=self.proxy).json()
+            return requests.post(self.webhook_url, headers=self.headers, json=data).json()
+
+        def upload_media(self, file_path):
+            upload_url = self.webhook_url.replace('send', 'upload_media') + '&type=file'
+            if self.proxy:
+                return requests.post(upload_url, proxies=self.proxy, files=[('media', open(file_path, 'rb'))]).json()
+            return requests.post(upload_url, files=[('media', open(file_path, 'rb'))]).json()
+
+        def file(self, file_path):
+            media_id = self.upload_media(file_path)['media_id']
+            return self.media(media_id)
+
+if __name__ == '__main__':
+    azkabanInfo = {
+        "url": "https://10.2.13.44:8443",
+        "username": "azkaban",
+        "password": "azkaban",
+    }
+    user = get_database_info('impala.username')
+    password = os.popen("sh /home/etl/impala.sh").readlines()[0].strip()
+    impala_info = {
+        "host": '10.2.13.44',
+        "port": 21050,
+        "auth_mechanism": "LDAP",
+        "user": 'cdh_dev',
+        "password": '123456'
+    }
+    impala_client = ImpalaClient(impala_info)
+    # 获取impala里project与flow名，是列表，里面装的是元组，元组里装了project与flow两个元素
+    list1 = impala_client.query(
+        "select project_name,flow_name,job_name,execute_time,execute_frequency,object_description,status_information from fin_dw.azkaban_monitor_times where whether_to_monitor='Y'")
+    url = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=5b5db45e-574d-405f-af9b-84dae7416ec8'
+    wechat_client = WechatWorkWebhook(url, proxy)
+    azkaban_client = AzkabanHelper(**azkabanInfo)
+    azkaban_client.login()
+
+    # 我们已经获取了列表，调用这个方法将impala里面的数据循环赋值给project与flow，以实现循环调用FetchTodayExecution()
+    azkaban_client.fetchTodayExecutions(list1)
