@@ -15,10 +15,12 @@ from get_database_info import get_database_info
 import logging as logger
 from functools import reduce
 import re
-
+'''
+方法比较多，这个功能的方法是写在fetchTodayExecutions里面的，其他方法也是可用的
+'''
 proxy = {
-    'http': 'http://172.20.6.194:3128',
-    'https': 'https://172.20.6.194:3128'
+    'http': 'XXX',  #这里填地址
+    'https': 'XXX'
 }
 
 class AzkabanHelper:
@@ -289,7 +291,7 @@ class AzkabanHelper:
         :param sessionId
         :return:
         '''
-        # 连接MySQL数据库
+        # 连接MySQL数据库，获取值班人员姓名
 
         sendmessage1 = []   # 用来存放执行不成功给或未执行job的信息
         sendmessage2 = []   # 用来存放工作流的报警信息
@@ -404,8 +406,8 @@ class AzkabanHelper:
 
 
         str_f = '今天未执行的任务或工作流：\n'+str_f1+'工作流预警:\n' + str_f2 #+ '\n' + '任务预警:\n' + str_f3
-        print(str_f)
-        #wechat_client.markdown(str_f)
+        #print(str_f)
+        wechat_client.markdown(str_f) #将我们的报警信息发送到企业微信
 
     def fetchExecutionsInfo(self, exec_id):
         '''
@@ -582,24 +584,25 @@ class WechatWorkWebhook:
 
 if __name__ == '__main__':
     azkabanInfo = {
-        "url": "https://10.2.13.44:8443",
-        "username": "azkaban",
-        "password": "azkaban",
+        "url": "Azkaban地址",
+        "username": "账号",
+        "password": "密码",
     }
     user = get_database_info('impala.username')
     password = os.popen("sh /home/etl/impala.sh").readlines()[0].strip()
     impala_info = {
-        "host": '10.2.13.44',
-        "port": 21050,
-        "auth_mechanism": "LDAP",
-        "user": 'cdh_dev',
-        "password": '123456'
+        "host": '地址',
+        "port": 端口号,
+        "auth_mechanism": "XX",
+        "user": 'XX',
+        "password": 'XX'
     }
     impala_client = ImpalaClient(impala_info)
-    # 获取impala里project与flow名，是列表，里面装的是元组，元组里装了project与flow两个元素
+    # 连接impala，获取里面的project与flow名，是列表，里面装的是元组，元组里装了project与flow两个元素
+    # impala是Hadoop的一个组件，如果用不到可以不要这个，类似于mysql的东西
     list1 = impala_client.query(
         "select project_name,flow_name,job_name,execute_time,execute_frequency,object_description,status_information from fin_dw.azkaban_monitor_times where whether_to_monitor='Y'")
-    url = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=5b5db45e-574d-405f-af9b-84dae7416ec8'
+    url = '企业微信地址'
     wechat_client = WechatWorkWebhook(url, proxy)
     azkaban_client = AzkabanHelper(**azkabanInfo)
     azkaban_client.login()
